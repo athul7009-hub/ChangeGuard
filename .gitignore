@@ -21,3 +21,15 @@ htmlcov/
 .vscode/
 .DS_Store
 Thumbs.db
+
+
+# Local backup copies
+app/main - Copy.py
+app/git_analyzer - Copy.py
+
+# Separate demonstration repository
+/sample_project/
+
+# Local backup copies
+app/main - Copy.py
+app/git_analyzer - Copy.py

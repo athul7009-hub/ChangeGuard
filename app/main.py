@@ -3,6 +3,10 @@ import ollama
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from app.test_runner import run_related_tests
+from app.git_impact_analyzer import analyze_git_impact
+from app.git_impact_analyzer import analyze_working_tree_impact
+
 
 from app.graph_builder import build_dependency_graph
 from app.impact_analyzer import analyze_impact
@@ -26,6 +30,17 @@ class ProjectRequest(BaseModel):
 class ImpactRequest(BaseModel):
     changed_file: str
 
+class GitImpactRequest(BaseModel):
+    project_path: str
+    base_ref: str
+    compare_ref: str
+
+class WorkingTreeRequest(BaseModel):
+    project_path: str
+
+class RunTestsRequest(BaseModel):
+    project_path: str
+    related_tests: list[str]
 
 HTML_PAGE = r"""
 <!DOCTYPE html>
@@ -95,9 +110,111 @@ HTML_PAGE = r"""
         <button id="loadButton" onclick="loadProject()">Load project folder</button>
         <p id="projectStatus" class="status">Loading the sample project...</p>
     </section>
+    
+<section class="panel">
+    <h2>Git Analysis</h2>
+    <p class="subtitle">
+        Compare two Git versions to find changed files
+        and identify potentially affected files and tests.
+    </p>
+
+    <label for="gitBaseRef">Base Git reference</label>
+    <input id="gitBaseRef" type="text" value="HEAD~1">
+
+    <label for="gitCompareRef">Compare against</label>
+    <input id="gitCompareRef" type="text" value="HEAD">
+
+    <button id="gitAnalyzeButton" onclick="analyzeGitChanges()">
+        Analyze Git Changes
+    </button>
+    <button id="runTestsButton" onclick="runRelatedTests()">
+        Run Related Tests
+    </button>
+    <div id="testResults"></div>
+    
+    <p id="gitStatus" class="status">
+        Enter two Git references and start the analysis.
+    </p>
+
+    <div id="gitResults" class="results">
+        <div class="result-section">
+            <h3>Added files</h3>
+            <ul id="gitAdded"></ul>
+        </div>
+        
+        <div class="result-section">
+            <h3>Change Risk Assessment</h3>
+            <p id="gitRisk">Risk assessment will appear here.</p>
+            <p id="gitRiskFactors"></p>
+        </div>
+
+        <div class="result-section">
+            <h3>Modified files</h3>
+            <ul id="gitModified"></ul>
+        </div>
+        <div class="result-section">
+            <h3>Deleted files</h3>
+            <ul id="gitDeleted"></ul>
+        </div>
+        <div class="result-section">
+            <h3>Potentially affected files</h3>
+            <ul id="gitAffected"></ul>
+        </div>
+        <div class="result-section">
+            <h3>Related tests</h3>
+            <ul id="gitTests"></ul>
+        </div>
+        
+    </div>
+</section>
+    
+<section class="panel">
+    <h2>Working Tree Analysis</h2>
+    <p class="subtitle">
+        Analyze local Python changes in your project compared with HEAD,
+        including staged, unstaged, and untracked files.
+    </p>
+
+    <button id="workingTreeButton" onclick="analyzeWorkingTree()">
+        Analyze Working Tree
+    </button>
+
+    <p id="workingTreeStatus" class="status">
+        Click the button to analyze your local changes.
+    </p>
+
+    <div id="workingTreeResults" class="results">
+        <div class="result-section">
+            <h3>Change Risk Assessment</h3>
+            <p id="wtRisk">Risk assessment will appear here.</p>
+            <p id="wtRiskFactors"></p>
+        </div>
+        <div class="result-section">
+            <h3>Added files</h3>
+            <ul id="wtAdded"></ul>
+        </div>
+        <div class="result-section">
+            <h3>Modified files</h3>
+            <ul id="wtModified"></ul>
+        </div>
+        <div class="result-section">
+            <h3>Deleted files</h3>
+            <ul id="wtDeleted"></ul>
+        </div>
+        <div class="result-section">
+            <h3>Potentially affected files</h3>
+            <ul id="wtAffected"></ul>
+        </div>
+        <div class="result-section">
+            <h3>Related tests</h3>
+            <ul id="wtTests"></ul>
+        </div>
+    </div>
+</section>
 
     <section class="panel">
         <h2>2. Analyze a code change</h2>
+
         <label for="changedFile">Select a Python file</label>
         <select id="changedFile" disabled>
             <option value="">Load a project first</option>
@@ -197,6 +314,7 @@ async function analyzeImpact() {
     const button = document.getElementById("analyzeButton");
     const status = document.getElementById("status");
     const changedFile = document.getElementById("changedFile").value;
+    window.latestRelatedTests = [];
     const results = document.getElementById("results");
     const aiPanel = document.getElementById("aiPanel");
     const graphPanel = document.getElementById("graphPanel");
@@ -227,6 +345,7 @@ async function analyzeImpact() {
         renderList("indirectFiles", data.indirectly_affected);
         renderList("allFiles", data.all_affected);
         renderList("testFiles", data.related_tests);
+        window.latestRelatedTests = data.related_tests || [];
         results.style.display = "block";
         status.textContent = "Dependency analysis completed. Building visual graph...";
 
@@ -252,6 +371,129 @@ async function analyzeImpact() {
         document.getElementById("aiExplanation").textContent = aiData.explanation;
         aiPanel.style.display = "block";
         status.textContent = "Dependency analysis and AI explanation completed.";
+    } catch (error) {
+        status.textContent = "Error: " + error.message;
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function analyzeGitChanges() {
+    const button = document.getElementById("gitAnalyzeButton");
+    const status = document.getElementById("gitStatus");
+    const results = document.getElementById("gitResults");
+
+    const projectPath = document.getElementById("projectPath").value.trim();
+    const baseRef = document.getElementById("gitBaseRef").value.trim();
+    const compareRef = document.getElementById("gitCompareRef").value.trim();
+
+    if (!projectPath || !baseRef || !compareRef) {
+        status.textContent = "Enter the project path and both Git references.";
+        return;
+    }
+
+    button.disabled = true;
+    results.style.display = "none";
+    status.textContent = "Comparing Git versions and analyzing impact...";
+
+    try {
+        const response = await fetch("/git-analyze", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+                project_path: projectPath,
+                base_ref: baseRef,
+                compare_ref: compareRef
+            })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.detail || "Git analysis failed.");
+        }
+
+        renderList("gitAdded", data.added);
+        renderList("gitModified", data.modified);
+        renderList("gitDeleted", data.deleted);
+        renderList("gitAffected", data.all_affected);
+        renderList("gitTests", data.related_tests);
+        
+const risk = data.risk;
+
+document.getElementById("gitRisk").textContent =
+    risk ? `${risk.score}/100 — ${risk.level} Risk` : "Risk unavailable";
+
+document.getElementById("gitRiskFactors").textContent = risk
+    ? `Changed lines: ${risk.factors.changed_lines} | ` +
+      `Affected files: ${risk.factors.affected_files} | ` +
+      `Related tests found: ${risk.factors.related_tests_found}`
+    : "";
+
+        results.style.display = "block";
+        status.textContent =
+            `Git analysis completed. ${data.total_changed} changed file(s) detected.`;
+
+    } catch (error) {
+        status.textContent = "Error: " + error.message;
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function analyzeWorkingTree() {
+    const button = document.getElementById("workingTreeButton");
+    const status = document.getElementById("workingTreeStatus");
+    const results = document.getElementById("workingTreeResults");
+
+    const projectPath = document.getElementById("projectPath").value.trim();
+
+    if (!projectPath) {
+        status.textContent = "Please load a project folder first.";
+        return;
+    }
+
+    button.disabled = true;
+    results.style.display = "none";
+    status.textContent = "Analyzing local Python changes...";
+
+    try {
+        const response = await fetch("/working-tree-analyze", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+                project_path: projectPath
+            })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(data.detail || "Working tree analysis failed.");
+        }
+
+        renderList("wtAdded", data.added);
+        renderList("wtModified", data.modified);
+        renderList("wtDeleted", data.deleted);
+        renderList("wtAffected", data.all_affected);
+        renderList("wtTests", data.related_tests);
+
+        const risk = data.risk;
+
+        document.getElementById("wtRisk").textContent =
+            risk ? `${risk.score}/100 — ${risk.level} Risk`
+                 : "Risk unavailable";
+
+        document.getElementById("wtRiskFactors").textContent = risk
+            ? `Changed lines: ${risk.factors.changed_lines} | ` +
+              `Affected files: ${risk.factors.affected_files} | ` +
+              `Related tests found: ${risk.factors.related_tests_found}`
+            : "";
+
+        results.style.display = "block";
+        status.textContent =
+            `Working tree analysis completed. ${data.total_changed} changed file(s) detected.`;
+
     } catch (error) {
         status.textContent = "Error: " + error.message;
     } finally {
@@ -376,6 +618,65 @@ window.addEventListener("DOMContentLoaded", () => {
     document.getElementById("projectPath").value = __DEFAULT_PROJECT_PATH__;
     loadProject();
 });
+
+async function runRelatedTests() {
+    const projectPath = document.getElementById("projectPath").value.trim();
+    const resultsDiv = document.getElementById("testResults");
+    const button = document.getElementById("runTestsButton");
+
+    if (!projectPath) {
+        resultsDiv.textContent = "Please select a project folder first.";
+        return;
+    }
+
+    button.disabled = true;
+    resultsDiv.textContent = "Running related tests...";
+
+    try {
+        const response = await fetch("/run-related-tests", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                project_path: projectPath,
+                related_tests: window.latestRelatedTests || []
+            })
+        });
+
+        const result = await response.json();
+
+        if (!response.ok) {
+            throw new Error(result.detail || "The test request failed.");
+        }
+
+        resultsDiv.replaceChildren();
+
+        const heading = document.createElement("h3");
+        heading.textContent = "Test status: " + result.status;
+        resultsDiv.appendChild(heading);
+
+        const summary = document.createElement("p");
+        summary.textContent = result.message;
+        resultsDiv.appendChild(summary);
+
+        const details = document.createElement("p");
+        details.textContent =
+            "Test files: " + result.tests_discovered +
+            " | Duration: " + result.duration_seconds + " seconds";
+        resultsDiv.appendChild(details);
+
+        const output = document.createElement("pre");
+        output.textContent = result.output || "No test output.";
+        resultsDiv.appendChild(output);
+
+    } catch (error) {
+        resultsDiv.textContent = "Could not run tests: " + error.message;
+    } finally {
+        button.disabled = false;
+    }
+}
+
 </script>
 </body>
 </html>
@@ -516,7 +817,12 @@ def get_graph_data(request: ImpactRequest):
 def analyze_code_change(request: ImpactRequest):
     graph = build_dependency_graph(str(PROJECT_PATH))
     try:
-        return analyze_impact(graph, request.changed_file)
+        # return analyze_impact(graph, request.changed_file)
+        return analyze_impact(
+        graph,
+        request.changed_file,
+        project_root=str(PROJECT_PATH),
+        )
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
@@ -525,7 +831,12 @@ def analyze_code_change(request: ImpactRequest):
 def explain_code_change(request: ImpactRequest):
     graph = build_dependency_graph(str(PROJECT_PATH))
     try:
-        impact = analyze_impact(graph, request.changed_file)
+        # impact = analyze_impact(graph, request.changed_file)
+        impact = analyze_impact(
+        graph,
+        request.changed_file,
+        project_root=str(PROJECT_PATH),
+    )
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
@@ -568,4 +879,52 @@ Do not invent functions or dependencies.
                 "Could not generate the AI explanation. Check that Ollama is running "
                 f"and model '{MODEL_NAME}' is installed. Details: {error}"
             ),
+        ) from error
+
+
+@app.post("/working-tree-analyze")
+def analyze_working_tree(request: WorkingTreeRequest):
+    try:
+        return analyze_working_tree_impact(
+            project_path=request.project_path,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+@app.post("/git-analyze")
+def analyze_git_changes(request: GitImpactRequest):
+    try:
+        return analyze_git_impact(
+            project_path=request.project_path,
+            base_ref=request.base_ref,
+            compare_ref=request.compare_ref,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        ) from error
+
+@app.post("/run-related-tests")
+def run_project_related_tests(request: RunTestsRequest):
+    project_root = Path(request.project_path).expanduser().resolve()
+
+    if not project_root.exists() or not project_root.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail="The selected project folder does not exist.",
+        )
+
+    try:
+        return run_related_tests(
+            project_root=str(project_root),
+            related_tests=request.related_tests,
+        )
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not run related tests: {error}",
         ) from error
